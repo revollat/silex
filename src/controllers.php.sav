@@ -1,0 +1,335 @@
+<?php
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+use Nca\Outils;
+
+//$app->get('/phpinfo/fefeugfuizegfzefgzeffe1ze514fz651zeg351zeg351zeg', function() {
+//    return new Response(phpinfo());
+//});
+//$app->get('/fake/mail', function() use ($app) {
+//    $message = \Swift_Message::newInstance()
+//        ->setSubject('Concours photo : validation de la participation')
+//        ->setFrom(array('nepasrepondre@nicecotedazur.org' => 'Ville de Nice'))
+//        ->setTo(array("benoit.bresson@nicecotedazur.org" => 'Benoit bresson'))
+//        ->setBody($app['twig']->render('mails/inscription.twig',array( // le mail est dans un template pour plus de souplesse pour la customisation (et on peut passer des variables à ce template)
+//            'nom'=> 'bresson',
+//            'prenom' => 'benoit',
+//            'url_confirmation' => 'http://www.fakeurl.com',
+//        )),'text/html');
+//
+//    $app['mailer']->send($message); // envoi mail !
+//    return new Response('Mail envoyé :)');
+//});
+
+$app->get('/token/{token}', function($token) use ($app) {
+
+    $participant = $app['db']->executeQuery("SELECT * FROM paillon WHERE token_inscription = '$token'")->fetch();
+    $autre_inscription = $app['db']->executeQuery('SELECT * FROM paillon WHERE email = ? AND inscription = 1', array($participant['email']))->fetch();
+
+    if($autre_inscription){
+
+        $message_template = 'Vous avez déja confirmé une participation.';
+        $css_alert_box = 'warning';
+
+    }else{
+
+        $message_template = 'Votre participation au concours est bien confirmée !';
+        $css_alert_box = 'success';
+
+        $app['db']->update('paillon',
+            array('inscription' => 1), // champs a updater : 'confirme = 1', ...
+            array('token_inscription' => $token) // condition 'WHERE token = $token'
+        );
+
+        // Envoi d'un mail de validation par l'organisation pour modération
+        $url_moderation = $app['url_generator']->generate('moderation', array('token' => $participant['token_moderation']), true);
+        $url_moderation .= "#participer";
+        $url_home = $app['url_generator']->generate('homepage', array(), true);
+        $message_m = \Swift_Message::newInstance()
+            ->setSubject('Concours photo : modération de la participation')
+            ->setFrom(array('nepasrepondre@nicecotedazur.org' => 'Ville de Nice'))
+            ->setTo(array("benoit.bresson@nicecotedazur.org" => 'Modérateur'))
+            ->setBody($app['twig']->render('mails/moderation.twig',array( // le mail est dans un template pour plus de souplesse pour la customisation (et on peut passer des variables à ce template)
+                'nom'=> $participant['nom'],
+                'prenom' => $participant['prenom'],
+                'titre' => $participant['titre'],
+                'email' => $participant['email'],
+                'url_image'=>  $url_home . "uploads/" .  $participant['photo'],
+                'url_moderation' => $url_moderation,
+            )),'text/html');
+        $app['mailer']->send($message_m); // envoi mail !
+
+    }
+
+
+    return $app['twig']->render('confirm.twig', array(
+        'message' => $message_template,
+        'css_alert_box' => $css_alert_box
+    ));
+
+})->bind('inscription');
+
+$app->get('/moderation/{token}', function($token) use ($app) {
+
+    $app['db']->update('paillon',
+        array('moderation' => 1), // champs a updater : 'confirme = 1', ...
+        array('token_moderation' => $token) // condition 'WHERE token = $token'
+    );
+
+    $participant = $app['db']->executeQuery("SELECT * FROM paillon WHERE token_moderation = '$token'")->fetch();
+
+    // Envoi d'un mail au participant pour lui dire que sa photo est en ligne
+    $url_participations = $app['url_generator']->generate('homepage', array(), true) . "?p=1#participations";
+    $message_m = \Swift_Message::newInstance()
+        ->setSubject('Concours photo : modération de la participation')
+        ->setFrom(array('nepasrepondre@nicecotedazur.org' => 'Ville de Nice'))
+        ->setTo(array($participant['email'] => $participant['prenom'] . ' ' . $participant['nom']))
+        ->setBody($app['twig']->render('mails/indication.twig',array( // le mail est dans un template pour plus de souplesse pour la customisation (et on peut passer des variables à ce template)
+            'nom'=> $participant['nom'],
+            'prenom' => $participant['prenom'],
+            'url_participations' => $url_participations,
+        )),'text/html');
+    $app['mailer']->send($message_m); // envoi mail !
+
+    return $app['twig']->render('confirm_bis.twig');
+
+})->bind('moderation');
+
+$app->post('/submit-participation', function (Request $request) use ($app) {
+
+    $form = $app['form.factory']->createBuilder($app['form.types']['participation'])->getForm();
+
+    $form->handleRequest($request);
+
+    if ($form->isValid()) {
+
+        $token_inscription = md5(uniqid(rand(), TRUE));
+        $token_moderation = md5(uniqid(rand(), TRUE));
+
+        $form_data = $form->getData();
+
+        $app['db']->insert("paillon", array(
+            'nom' => $form_data["nom"],
+            'prenom' => $form_data["prenom"],
+            'email' => $form_data["email"],
+            'tel' => $form_data["tel"],
+            'adresse' => $form_data["adresse"],
+            'cp' => $form_data["cp"],
+            'ville' => $form_data["ville"],
+            'photo' => $form_data["image"],
+            'titre' => $form_data["titre"],
+            'lieu' => $form_data["lieu"],
+            'date_photo' => $form_data["date_photo"]->format('Y-m-d'),
+            'date_ajout' => date("Y-m-d H:i:s"),
+            'token_inscription' => $token_inscription,
+            'token_moderation' => $token_moderation
+        ));
+
+        // Envoi d'un mail de confirmation d'inscription
+        $url_confirmation = $app['url_generator']->generate('inscription', array('token' => $token_inscription), true);
+
+        $url_confirmation .= "#participer";
+
+        $message = \Swift_Message::newInstance()
+            ->setSubject('Concours photo : validation de la participation')
+            ->setFrom(array('nepasrepondre@nicecotedazur.org' => 'Ville de Nice'))
+            ->setTo(array($form_data["email"] => $form_data["prenom"].' '.$form_data["nom"]))
+            ->setBody($app['twig']->render('mails/inscription.twig',array( // le mail est dans un template pour plus de souplesse pour la customisation (et on peut passer des variables à ce template)
+                'nom'=> $form_data["nom"],
+                'prenom' => $form_data["prenom"],
+                'url_confirmation' => $url_confirmation,
+            )),'text/html');
+
+        $app['mailer']->send($message); // envoi mail !
+
+        // Retour du statut "success"
+        $http_status_code = 200;
+        $to_return = array('OK');
+
+    }else{
+
+        $http_status_code = 400;
+        $to_return = Outils::getErrorsAsArray($form);
+
+    }
+
+    return $app->json($to_return, $http_status_code);
+
+})->bind('submit-ajax');
+
+$app->post('/submitphoto', function (Request $request) use ($app) {
+
+    $uploadedFile = $request->files->get('file');
+
+    if( ! Outils::isImageOk($uploadedFile)){
+        //$app->abort(400, "Image invalide");
+        return new Response("Erreur", 400);
+    }
+
+    // Si l'image est ok on la déplace dans le dossier "uploads/"
+    $name = uniqid("vpdp_") . "." . $uploadedFile->guessExtension();
+    $file = $uploadedFile->move($app['upload_dir'], $name);
+    //return $app->json($file->getfilename(), 200, array('Content-Type' => 'text/html'));
+    return new Response($file->getfilename());
+
+})->bind('submit-ajax-photo');
+
+$app->get('/vote/{token}', function($token) use ($app) {
+
+    $participant = $app['db']->executeQuery("SELECT * FROM vote WHERE token_vote = '$token'")->fetch();
+
+    $deja_vote = $app['db']->executeQuery("SELECT * FROM vote WHERE email = '".$participant['email']."' AND confirme = 1")->fetch();
+
+    // Récup de l'image pour affichage et mise à jour du partage sur réseaux sociaux
+    $laphoto = $app['db']->executeQuery('SELECT * FROM paillon WHERE id = \''.$participant["photo_id"].'\'')->fetch();
+
+    if(empty($deja_vote)){
+
+        $app['db']->update('vote',
+            array('confirme' => 1), // champs a updater : 'confirme = 1', ...
+            array('token_vote' => $token) // condition 'WHERE token = $token'
+        );
+
+        return $app['twig']->render('confirm_vote.twig', array(
+            'lastimages' => null,
+            'erreur' => null,
+            'shareimage' => $laphoto,
+        ));
+
+    }
+    else{
+
+        return $app['twig']->render('confirm_vote.twig', array(
+            'erreur' => "Vous avez déjà validé un vote !",
+            'shareimage' => $laphoto,
+        ));
+
+    }
+
+
+//    // Envoi d'un mail au moderateur pour l'informer du vote
+//    $message_m = \Swift_Message::newInstance()
+//        ->setSubject('Concours photo : modération du vote')
+//        ->setFrom(array('nepasrepondre@nicecotedazur.org' => 'Ville de Nice'))
+//        ->setTo(array('benoit.bresson@nicecotedazur.org' => 'Ville de Nice'))
+//        ->setBody($app['twig']->render('mails/voteok.twig',array( // le mail est dans un template pour plus de souplesse pour la customisation (et on peut passer des variables à ce template)
+//            'email'=> $participant['email'],
+//            'date_ajout' => $participant['date_ajout'],
+//        )),'text/html');
+//    $app['mailer']->send($message_m); // envoi mail !
+
+
+
+})->bind('confirm-vote');
+
+$app->post('/submit-vote', function (Request $request) use ($app) {
+
+    $formvote = $app['form.factory']->createBuilder($app['form.types']['vote'])->getForm();
+
+    $formvote->handleRequest($request);
+
+    if ($formvote->isValid()) {
+
+        $token_vote = md5(uniqid(rand(), TRUE));
+
+        $form_data = $formvote->getData();
+
+        $app['db']->insert("vote", array(
+            'email' => $form_data["email"],
+            'photo_id' => $_POST["choix"],
+            'titre' => $form_data["titre"],
+            'date_ajout' => date("Y-m-d H:i:s"),
+            'token_vote' => $token_vote
+        ));
+
+        // Envoi d'un mail de confirmation d'inscription
+        $url_confirmation = $app['url_generator']->generate('confirm-vote', array('token' => $token_vote), true);
+
+        $url_confirmation .= "#participer";
+
+        $message = \Swift_Message::newInstance()
+            ->setSubject('Concours photo : validation de votre vote')
+            ->setFrom(array('nepasrepondre@nicecotedazur.org' => 'Ville de Nice'))
+            ->setTo(array($form_data["email"] => "Participant au vote"))
+            ->setBody($app['twig']->render('mails/vote.twig',array( // le mail est dans un template pour plus de souplesse pour la customisation (et on peut passer des variables à ce template)
+                'email'=> $form_data["email"],
+                'url_confirmation' => $url_confirmation,
+            )),'text/html');
+
+        $app['mailer']->send($message); // envoi mail !
+
+
+        // Retour du statut "success"
+        $http_status_code = 200;
+        $to_return = array('OK');
+
+    }else{
+
+        $http_status_code = 400;
+        $to_return = Outils::getErrorsAsArray($formvote);
+
+    }
+
+    return $app->json($to_return, $http_status_code);
+
+})->bind('submit-form-vote');
+
+$app->get('/', function() use ($app) {
+
+    $formvote = $app['form.factory']->createBuilder($app['form.types']['vote'])->getForm();
+
+    $photos = $app['db']->executeQuery("SELECT * FROM paillon WHERE selection = 1")->fetchAll();
+
+    shuffle($photos);
+
+    return $app['twig']->render('vote.twig', array(
+        'formvote' => $formvote->createView(),
+        'photos' => $photos,
+        'lastimages' => null
+    ));
+
+})->bind('vote');
+
+$app->get('/urljury', function() use ($app) {
+
+    $photos = $app['db']->executeQuery("SELECT * FROM paillon WHERE moderation = 1 AND inscription = 1 AND jury = 1 ORDER BY id DESC ")->fetchAll();
+
+    return $app['twig']->render('all.twig', array(
+        'photos' => $photos,
+        'lastimages' => null
+    ));
+
+})->bind('all');
+
+$app->get('/renamephoto', function (Request $request) use ($app) {
+    ini_set('max_execution_time', 600); //300 seconds = 5 minutes
+    $dir = "uploads";
+
+    $files = scandir($dir);
+//
+//    echo"<pre>";
+//    var_dump($files);
+//    echo"</pre>";
+
+
+    foreach($files as $file) {
+
+        $img_bdd = $app['db']->executeQuery('SELECT * FROM paillon WHERE photo = ? AND inscription = 1 AND moderation = 1', array($file))->fetch();
+
+        if (!empty($img_bdd)) {
+            //echo $img_bdd['photo']."<br>";
+            copy($dir."/".$file,"copie/".$img_bdd['id']."_".$file);
+        }
+    }
+    exit();
+})->bind('renamephoto');
+
+//$app->get('/', function() use ($app) {
+//
+//    $form = $app['form.factory']->createBuilder($app['form.types']['participation'])->getForm();
+//
+//    return $app['twig']->render('form.twig', array(
+//        'form' => $form->createView()
+//    ));
+//
+//})->bind('homepage');
